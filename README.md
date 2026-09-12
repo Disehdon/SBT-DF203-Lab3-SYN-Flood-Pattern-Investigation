@@ -38,10 +38,13 @@
 - [Overview](#overview)
 - [Objectives](#objectives)
 - [Methodology](#methodology)
+- [Section 3 — Environment and Evidence Preparation](#section-3--environment-and-evidence-preparation)
+- [Section 4 — Normal Handshake Baseline](#section-4--normal-handshake-baseline)
+- [Section 5 — Bounded SYN Simulation](#section-5--bounded-syn-simulation)
+- [Section 6 — SYN Indicator Extraction](#section-6--syn-indicator-extraction)
+- [Section 7 — Quantitative Analysis](#section-7--quantitative-analysis)
 - [Key Findings](#key-findings)
 - [Repository Structure](#repository-structure)
-- [Getting Started](#getting-started)
-- [Analysis Commands](#analysis-commands)
 - [Evidence and Chain of Custody](#evidence-and-chain-of-custody)
 - [Detection and Mitigation](#detection-and-mitigation)
 - [Safety and Ethics](#safety-and-ethics)
@@ -56,7 +59,7 @@ This repository contains the complete evidence package, analysis outputs, simula
 
 The investigation establishes a **normal HTTP handshake baseline** against a local Apache service on the loopback interface, then performs a **strictly bounded four-packet SYN simulation** using Scapy. TShark display filters are applied to isolate SYN, SYN-ACK, ACK, and RST behaviour, quantify counts and unique source ports, and produce a defensible forensic timeline.
 
-The analysis distinguishes the *packet pattern* of a SYN flood from proof of an actual denial-of-service event — a key forensic distinction examined in detail in the report.
+The analysis distinguishes the *packet pattern* of a SYN flood from proof of an actual denial-of-service event — a key forensic distinction examined in detail below.
 
 ---
 
@@ -72,8 +75,6 @@ The analysis distinguishes the *packet pattern* of a SYN flood from proof of an 
 ---
 
 ## Methodology
-
-The lab was conducted in three sequential phases, all executed against `127.0.0.1:80` on the loopback interface.
 
 | Phase | Description | Output |
 | :---: | :--- | :--- |
@@ -94,6 +95,221 @@ The lab was conducted in three sequential phases, all executed against `127.0.0.
 
 ---
 
+## Section 3 — Environment and Evidence Preparation
+
+### 3.1 Folder Structure
+
+```bash
+mkdir -p ~/SBT-DF203-Lab3/{evidence,working,exported,reports,screenshots,scripts}
+cd ~/SBT-DF203-Lab3
+find . -maxdepth 1 -type d -print
+```
+
+![Figure 3.1 — Lab folder structure created successfully](screenshots/fig_3.1_folder_structure.png)
+
+*Figure 3.1 — Lab folder structure showing all six subdirectories: `reports`, `scripts`, `exported`, `screenshots`, `evidence`, `working`.*
+
+### 3.2 Tools Installed and Verified
+
+```bash
+sudo apt update
+sudo apt install -y apache2 tshark wireshark python3-scapy
+sudo systemctl enable --now apache2
+sudo ss -lntp | grep ':80'
+tshark --version
+```
+
+![Figure 3.2 — Apache running on port 80 with TShark and Scapy verified](screenshots/fig_3.2_tools_installed.png)
+
+*Figure 3.2 — Apache2 active on TCP/80, TShark 4.6.6, Wireshark 4.6.6, and Python3-Scapy 2.7.0 confirmed.*
+
+### 3.3 Supplied Training Capture (Optional)
+
+The optional supplied training PCAP URL returned **HTTP 404 Not Found** at execution time.
+
+```bash
+wget -O evidence/mySYNFloodCapture.pcap \
+'https://raw.githubusercontent.com/frankwuxu/digital-forensics-lab/main/Illegal_Possession_Images/lab_files/SYN_Flood/mySYNFloodCapture.pcap'
+```
+
+![Figure 3.3 — wget attempt showing HTTP 404 for the optional supplied training PCAP](screenshots/fig_3.3_wget_404.png)
+
+*Figure 3.3 — HTTP 404 response from the optional supplied training PCAP. Since the file is optional, all analysis proceeds from locally generated captures.*
+
+---
+
+## Section 4 — Normal Handshake Baseline
+
+### 4.1 Capture
+
+**Terminal 1:**
+```bash
+sudo tshark -i lo -f 'tcp port 80' -a duration:15 -w /tmp/normal_http.pcapng
+```
+
+**Terminal 2:**
+```bash
+curl --no-keepalive http://127.0.0.1/ > /dev/null
+```
+
+![Figure 4.1 — Live capture on lo while curl generates the normal HTTP GET](screenshots/fig_4.1_capture_running.png)
+
+*Figure 4.1 — Dual-pane terminal: capture running on `lo` (left) and curl retrieving 10,703 bytes of HTML (right).*
+
+### 4.2 Extract Handshake Flags
+
+```bash
+tshark -r evidence/normal_http.pcapng \
+-Y 'tcp.flags.syn==1 || tcp.flags.fin==1' \
+-T fields -e frame.number -e frame.time -e ip.src -e tcp.srcport \
+-e ip.dst -e tcp.dstport -e tcp.flags \
+| tee reports/normal_handshake_flags.tsv
+```
+
+![Figure 4.2 — Normal handshake flags extracted with TShark](screenshots/fig_4.2_handshake_tsv.png)
+
+*Figure 4.2 — SYN, SYN-ACK, and two FIN-ACK frames from the clean baseline session. Client port 40464, server port 80.*
+
+### 4.3 Wireshark Visualisation of the SYN Packet
+
+![Figure 4.3 — Wireshark view with SYN flag expanded](screenshots/fig_4.3_wireshark_handshake.png)
+
+*Figure 4.3 — Frame 1 (SYN) expanded in Wireshark with the display filter `tcp.flags.syn==1 || tcp.flags.fin==1` applied.*
+
+### 4.4 Handshake Table
+
+| Frame | Time | Src | Src Port | Dst | Dst Port | Flags | Interpretation |
+| :---: | :--- | :--- | :---: | :--- | :---: | :---: | :--- |
+| 1 | 2026-09-12T11:41:30.694845448-0400 | 127.0.0.1 | 40464 | 127.0.0.1 | 80 | `0x0002` | SYN — client initiates |
+| 2 | 2026-09-12T11:41:30.694859362-0400 | 127.0.0.1 | 80 | 127.0.0.1 | 40464 | `0x0012` | SYN, ACK — server responds |
+| 3 | 2026-09-12T11:41:30.694870764-0400 | 127.0.0.1 | 40464 | 127.0.0.1 | 80 | `0x0010` | ACK — connection established |
+| 8 | 2026-09-12T11:41:30.703234427-0400 | 127.0.0.1 | 40464 | 127.0.0.1 | 80 | `0x0011` | FIN, ACK — client closes |
+| 9 | 2026-09-12T11:41:30.703387794-0400 | 127.0.0.1 | 80 | 127.0.0.1 | 40464 | `0x0011` | FIN, ACK — server closes |
+
+---
+
+## Section 5 — Bounded SYN Simulation
+
+### 5.1 Scapy Simulation Script
+
+```python
+# scripts/syn_probe_lab.py
+from scapy.all import IP, TCP, RandShort, send
+
+TARGET = '127.0.0.1'
+PORT = 80
+COUNT = 4
+
+packets = [IP(dst=TARGET)/TCP(sport=RandShort(), dport=PORT, flags='S')
+           for _ in range(COUNT)]
+send(packets, verbose=False)
+print(f'Sent {COUNT} authorized training SYN packets to {TARGET}:{PORT}')
+```
+
+![Figure 5.1 — Bounded Scapy script showing target, port, and packet count](screenshots/fig_5.1_scapy_script.png)
+
+*Figure 5.1 — Bounded Scapy script showing target (127.0.0.1), port (80), and packet count (4).*
+
+### 5.2 Capture and Execute
+
+```bash
+# Terminal 1
+sudo tshark -i lo -f 'tcp port 80' -c 20 -w /tmp/bounded_syn_activity.pcapng
+
+# Terminal 2
+sudo python3 scripts/syn_probe_lab.py
+```
+
+![Figure 5.2 — Bounded simulation execution](screenshots/fig_5.2_simulation_run.png)
+
+*Figure 5.2 — Simulation output: `Sent 4 authorized training SYN packets to 127.0.0.1:80`.*
+
+### 5.3 Preserve and Hash
+
+```bash
+sudo cp /tmp/bounded_syn_activity.pcapng evidence/bounded_syn_activity.pcapng
+sudo chown ibrahim:ibrahim evidence/bounded_syn_activity.pcapng
+sudo chmod 644 evidence/bounded_syn_activity.pcapng
+cp --preserve=timestamps evidence/bounded_syn_activity.pcapng working/bounded_syn_activity_working.pcapng
+sha256sum evidence/bounded_syn_activity.pcapng working/bounded_syn_activity_working.pcapng \
+  | tee reports/bounded_capture_hashes.txt
+```
+
+![Figure 5.3 — Bounded capture hashes](screenshots/fig_5.3_bounded_hashes.png)
+
+*Figure 5.3 — Original and working copy produce identical SHA-256 hashes, confirming evidence integrity.*
+
+---
+
+## Section 6 — SYN Indicator Extraction
+
+### 6.1 Initial SYN Packets
+
+```bash
+PCAP=working/bounded_syn_activity_working.pcapng
+tshark -r "$PCAP" -Y 'tcp.flags.syn==1 && tcp.flags.ack==0' \
+-T fields -e frame.number -e frame.time_epoch -e ip.src -e tcp.srcport \
+-e ip.dst -e tcp.dstport -e tcp.seq | tee reports/initial_syns.tsv
+```
+
+![Figure 6.1 — Initial SYN packet list](screenshots/fig_6.1_initial_syns.png)
+
+*Figure 6.1 — Four initial SYN packets from unique ephemeral ports (2359, 49115, 29548, 55744), all to 127.0.0.1:80.*
+
+### 6.2 SYN-ACK Responses
+
+```bash
+tshark -r "$PCAP" -Y 'tcp.flags.syn==1 && tcp.flags.ack==1' \
+-T fields -e frame.number -e frame.time_epoch -e ip.src -e tcp.srcport \
+-e ip.dst -e tcp.dstport -e tcp.ack | tee reports/syn_ack_responses.tsv
+```
+
+![Figure 6.2 — SYN-ACK response list](screenshots/fig_6.2_syn_acks.png)
+
+*Figure 6.2 — Four SYN-ACK responses from the Apache server, each acknowledging the SYN with `Ack=1`.*
+
+### 6.3 ACK/RST Candidates
+
+```bash
+tshark -r "$PCAP" -Y 'tcp.flags.reset==1 || (tcp.flags.ack==1 && tcp.len==0)' \
+-T fields -e frame.number -e frame.time_epoch -e ip.src -e tcp.srcport \
+-e ip.dst -e tcp.dstport -e tcp.flags | tee reports/ack_reset_candidates.tsv
+```
+
+![Figure 6.3 — ACK/RST behaviour](screenshots/fig_6.3_rst.png)
+
+*Figure 6.3 — Alternating SYN-ACK (`0x0012`) and RST (`0x0004`) packets. The client OS rejects each SYN-ACK because no socket exists for the raw Scapy-crafted SYN.*
+
+---
+
+## Section 7 — Quantitative Analysis
+
+### 7.1 Counts by Source and Destination
+
+![Figure 7.1 — Counts by source/destination](screenshots/fig_7.1_counts.png)
+
+*Figure 7.1 — Four SYN packets all sourced from 127.0.0.1 to 127.0.0.1:80.*
+
+### 7.2 Unique Client Source Ports
+
+![Figure 7.2 — Unique source ports](screenshots/fig_7.2_unique_ports.png)
+
+*Figure 7.2 — Four distinct ephemeral source ports: 2359, 29548, 49115, 55744.*
+
+### 7.3 Expert Information
+
+![Figure 7.3 — Expert information summary](screenshots/fig_7.3_expert_info.png)
+
+*Figure 7.3 — Wireshark expert analysis: 4 warnings (RST), 4 notes (SACK PERM missing), 8 chats (SYN and SYN+ACK).*
+
+### 7.4 TCP Analysis Events
+
+![Figure 7.4 — TCP analysis events (empty — expected)](screenshots/fig_7.4_tcp_events.png)
+
+*Figure 7.4 — The `tcp.analysis.*` filter returns no rows. This is a positive finding: no retransmissions, no lost segments, no duplicate ACKs. The bounded simulation is clean at the transport-analysis level.*
+
+---
+
 ## Key Findings
 
 | Indicator | Normal HTTP | Bounded SYN | Forensic Meaning |
@@ -111,171 +327,59 @@ The lab was conducted in three sequential phases, all executed against `127.0.0.
 
 The capture demonstrates the **packet pattern** of a SYN flood — incomplete handshakes with no final ACK — but does **not** establish a denial-of-service event. A genuine SYN flood requires **scale, rate, persistence, and measurable service impact**, none of which are present in a four-packet bounded simulation.
 
-The absence of `tcp.analysis.*` events (retransmissions, lost segments, duplicate ACKs) further confirms that the simulation was **clean at the transport-analysis level**: the only indicators present are the application-layer incomplete handshakes.
-
 ---
 
 ## Repository Structure
-
-### Top-level layout
 
 ```
 SBT-DF203-Lab3-SYN-Flood-Pattern-Investigation/
 ├── README.md
 ├── SBT-DF203-Lab3_2025-FWSD-11521_Ibrahim_Diseh_Garba.pdf
 ├── evidence/
+│   ├── normal_http.pcapng
+│   └── bounded_syn_activity.pcapng
 ├── working/
-├── exported/
+│   └── bounded_syn_activity_working.pcapng
 ├── reports/
+│   ├── normal_handshake_flags.tsv
+│   ├── bounded_capture_hashes.txt
+│   ├── initial_syns.tsv
+│   ├── syn_ack_responses.tsv
+│   ├── ack_reset_candidates.tsv
+│   ├── syn_counts_by_pair.txt
+│   ├── unique_syn_source_ports.txt
+│   ├── expert_info.txt
+│   └── tcp_analysis_events.tsv
 ├── screenshots/
+│   ├── fig_3.1_folder_structure.png
+│   ├── fig_3.2_tools_installed.png
+│   ├── fig_3.3_wget_404.png
+│   ├── fig_4.1_capture_running.png
+│   ├── fig_4.2_handshake_tsv.png
+│   ├── fig_4.3_wireshark_handshake.png
+│   ├── fig_5.1_scapy_script.png
+│   ├── fig_5.2_simulation_run.png
+│   ├── fig_5.3_bounded_hashes.png
+│   ├── fig_6.1_initial_syns.png
+│   ├── fig_6.2_syn_acks.png
+│   ├── fig_6.3_rst.png
+│   ├── fig_7.1_counts.png
+│   ├── fig_7.2_unique_ports.png
+│   ├── fig_7.3_expert_info.png
+│   └── fig_7.4_tcp_events.png
 └── scripts/
-```
-
-### Directory contents
-
-| Directory | Contents | Purpose |
-| :--- | :--- | :--- |
-| `evidence/` | `normal_http.pcapng` (13 KB)<br>`bounded_syn_activity.pcapng` (1.3 KB) | Original captures — preserved unmodified |
-| `working/` | `bounded_syn_activity_working.pcapng` | Timestamp-preserved analysis copy |
-| `exported/` | *(reserved)* | Exported objects from captures |
-| `reports/` | 10 × `.tsv` / `.txt` files | TShark analysis outputs and evidence hashes |
-| `screenshots/` | 16 × `.png` figures | Numbered evidence screenshots referenced in the report |
-| `scripts/` | `syn_probe_lab.py` | Bounded Scapy SYN simulation |
-
-### `reports/` — analysis output files
-
-| File | Description |
-| :--- | :--- |
-| `normal_handshake_flags.tsv` | Baseline SYN / SYN-ACK / FIN flags |
-| `bounded_capture_hashes.txt` | SHA-256 of original and working copy |
-| `initial_syns.tsv` | Frames 1, 4, 7, 10 — SYN packets |
-| `syn_ack_responses.tsv` | Frames 2, 5, 8, 11 — SYN-ACK responses |
-| `ack_reset_candidates.tsv` | Alternating SYN-ACK / RST packets |
-| `syn_counts_by_pair.txt` | SYN counts grouped by source / destination |
-| `unique_syn_source_ports.txt` | 4 unique client ports |
-| `expert_info.txt` | Wireshark expert analysis summary |
-| `tcp_analysis_events.tsv` | Empty by design — no transport anomalies |
-| `syn_capture_sha256.txt` | SHA-256 of the (optional) supplied training PCAP |
-
-### `screenshots/` — numbered evidence figures
-
-| Group | Files |
-| :--- | :--- |
-| **Section 3 — Environment** | `fig_3.1_folder_structure.png` · `fig_3.2_tools_installed.png` · `fig_3.3_wget_404.png` |
-| **Section 4 — Baseline** | `fig_4.1_capture_running.png` · `fig_4.2_handshake_tsv.png` · `fig_4.3_wireshark_handshake.png` |
-| **Section 5 — Simulation** | `fig_5.1_scapy_script.png` · `fig_5.2_simulation_run.png` · `fig_5.3_bounded_hashes.png` |
-| **Section 6 — Indicators** | `fig_6.1_initial_syns.png` · `fig_6.2_syn_acks.png` · `fig_6.3_rst.png` |
-| **Section 7 — Quantification** | `fig_7.1_counts.png` · `fig_7.2_unique_ports.png` · `fig_7.3_expert_info.png` · `fig_7.4_tcp_events.png` |
-
----
-
-## Getting Started
-
-### Prerequisites
-
-- Kali Linux (or Debian-based distribution)
-- `sudo` privileges
-- Apache2 running locally
-
-### Installation
-
-```bash
-# 1. Clone the repository
-git clone https://github.com/Disehdon/SBT-DF203-Lab3-SYN-Flood-Pattern-Investigation.git
-cd SBT-DF203-Lab3-SYN-Flood-Pattern-Investigation
-
-# 2. Install dependencies
-sudo apt update
-sudo apt install -y apache2 tshark wireshark python3-scapy
-
-# 3. Enable and start Apache
-sudo systemctl enable --now apache2
-
-# 4. Verify port 80 is listening
-sudo ss -lntp | grep ':80'
-```
-
-### Running the Analysis
-
-See [Analysis Commands](#analysis-commands) for the complete TShark command set used to regenerate the outputs in `reports/`.
-
----
-
-## Analysis Commands
-
-The following commands regenerate every artefact in the `reports/` directory.
-
-### Initial SYN Packets
-
-```bash
-PCAP=working/bounded_syn_activity_working.pcapng
-
-tshark -r "$PCAP" \
-  -Y 'tcp.flags.syn==1 && tcp.flags.ack==0' \
-  -T fields \
-  -e frame.number -e frame.time_epoch -e ip.src -e tcp.srcport \
-  -e ip.dst -e tcp.dstport -e tcp.seq \
-  | tee reports/initial_syns.tsv
-```
-
-### SYN-ACK Responses
-
-```bash
-tshark -r "$PCAP" \
-  -Y 'tcp.flags.syn==1 && tcp.flags.ack==1' \
-  -T fields \
-  -e frame.number -e frame.time_epoch -e ip.src -e tcp.srcport \
-  -e ip.dst -e tcp.dstport -e tcp.ack \
-  | tee reports/syn_ack_responses.tsv
-```
-
-### ACK/RST Candidates
-
-```bash
-tshark -r "$PCAP" \
-  -Y 'tcp.flags.reset==1 || (tcp.flags.ack==1 && tcp.len==0)' \
-  -T fields \
-  -e frame.number -e frame.time_epoch -e ip.src -e tcp.srcport \
-  -e ip.dst -e tcp.dstport -e tcp.flags \
-  | tee reports/ack_reset_candidates.tsv
-```
-
-### Counts by Source / Destination
-
-```bash
-tshark -r "$PCAP" \
-  -Y 'tcp.flags.syn==1 && tcp.flags.ack==0' \
-  -T fields -e ip.src -e ip.dst -e tcp.dstport \
-  | sort | uniq -c | sort -nr \
-  | tee reports/syn_counts_by_pair.txt
-```
-
-### Expert Information
-
-```bash
-tshark -r "$PCAP" -q -z expert | tee reports/expert_info.txt
-```
-
-### Integrity Verification
-
-```bash
-sha256sum evidence/normal_http.pcapng evidence/bounded_syn_activity.pcapng \
-  | tee reports/bounded_capture_hashes.txt
+    └── syn_probe_lab.py
 ```
 
 ---
 
 ## Evidence and Chain of Custody
 
-Original captures were preserved unmodified. All analysis was performed on a timestamp-preserved working copy. Hashes are recorded below and stored in `reports/bounded_capture_hashes.txt`.
-
 | File | Size | SHA-256 |
 | :--- | :---: | :--- |
 | `evidence/normal_http.pcapng` | 13 KB | `6123b37efcb889f9d8f749c47549a09313db372749898a025272250982c5c7d5` |
 | `evidence/bounded_syn_activity.pcapng` | 1.3 KB | `ed678f8f1b2d8a232024885605ae4f11e27ee67d15f20a114aa3d6685eacc0d1` |
 | `working/bounded_syn_activity_working.pcapng` | 1.3 KB | `ed678f8f1b2d8a232024885605ae4f11e27ee67d15f20a114aa3d6685eacc0d1` |
-
-**Integrity confirmed.** The original and working copy of the bounded capture are byte-identical. The optional supplied training PCAP was unavailable — the download URL returned `HTTP 404 Not Found` at execution time.
 
 ### Case Metadata
 
@@ -309,18 +413,11 @@ Original captures were preserved unmodified. All analysis was performed on a tim
 | Upstream rate limiting | Rate-limit at the network edge or load balancer |
 | DDoS protection | Deploy dedicated mitigation services for high-volume attacks |
 
-### Forensic Practice
-
-- Retain full packet capture during incident response.
-- Synchronise system clocks across all endpoints for accurate timeline reconstruction.
-- Correlate packet evidence with web server, firewall, and load balancer logs.
-- Document chain of custody throughout evidence handling.
-
 ---
 
 ## Safety and Ethics
 
-This lab was executed **exclusively** within the ICDFA-approved isolated Kali Linux virtual machine, in full compliance with the SBT-DF203 legal and ethical guidelines.
+This lab was executed **exclusively** within the ICDFA-approved isolated Kali Linux virtual machine.
 
 - Target scope: **loopback only** (`127.0.0.1:80`)
 - Packet limit: **four SYN packets maximum** — strictly bounded
@@ -329,7 +426,7 @@ This lab was executed **exclusively** within the ICDFA-approved isolated Kali Li
 - All firewall, ARP, forwarding, and network settings restored after the lab
 - SHA-256 hashes recorded for chain of custody
 
-> **Warning:** The `scripts/syn_probe_lab.py` script is intended for **authorised training only**. Do not modify the packet count, do not target external systems, and do not automate repeated execution. Unauthorised use may violate computer misuse legislation.
+> **Warning:** The `scripts/syn_probe_lab.py` script is intended for **authorised training only**. Do not modify the packet count, do not target external systems, and do not automate repeated execution.
 
 ---
 
